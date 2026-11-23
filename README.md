@@ -4,7 +4,7 @@
 
 1. Install requirements: `pip install -r requirements.txt`
 2. Run: `streamlit run app.py`
-3. For Streamlit Community Cloud, upload `app.py`, `analysis.py`, `rolling_ball_imagej.py`, and `requirements.txt` to a GitHub repository and set the app entry point to `app.py`.
+3. For Streamlit Community Cloud, upload all files including `roi_editor_component.py` and the `roi_editor/` directory to a GitHub repository and set the app entry point to `app.py`.
 
 ## Validated analysis baseline (unchanged)
 
@@ -26,8 +26,16 @@ Across ten user-provided validation images, V7.8 density results agreed with the
 
 This release changes **website usability and export metadata only**. It does not modify the validated `analysis.py` or rolling-ball processing code.
 
-## Scale-bar exclusion (new optional setting)
-Enable **Exclude scale bar / annotation rectangle** and enter the left X, top Y, right X, bottom Y coordinates (pixels, origin at upper left). Check the red rectangle preview before running. The entire rectangle is excluded from Otsu histogram estimation, object detection, and the analyzed-area denominator. The original image remains unchanged, and the exported analyzed ROI mask documents exactly what was measured. The rectangle and enabled status are recorded in the CSV and JSON. This option defaults **off** so the prior V7.8 results remain reproducible. Use the same ROI in ImageJ when validating new values. The pre-existing optional bottom-strip exclusion is also available.
+## Interactive calibration and exclusion editor (drag-and-drop)
+
+The website now contains an embedded image editor with two independently movable tools:
+
+- **Cyan line (calibration):** select **Draw scale line**, drag across the visible scale bar to measure its pixel length, move the line by dragging its center, or resize it by dragging either endpoint. Enter the scale bar's real-world length (µm) in the sidebar. The measured line length replaces the former manually entered pixel-width setting.
+- **Orange rectangle (exclusion):** select **Draw exclusion rectangle**, drag to draw a new exclusion region, drag inside the region to move it, or drag its corners to resize. Enable the **Exclude scale bar / annotation rectangle** checkbox to actually remove these pixels from the segmentation and analyzed-area denominator. When unchecked, the rectangle is a preview only.
+
+The image is displayed at a responsive size, but all tool coordinates are stored in original-image pixels. After a drag is released, Streamlit reruns the analysis with the new calibration or exclusion. The line and rectangle are independently adjustable; moving the cyan line does not automatically move the orange rectangle. Verify that the rectangle covers the bar and label but avoids tissue where possible. The editor is implemented locally in `roi_editor/index.html` and requires no external JavaScript CDN.
+
+**Scientific note:** dragging the calibration line can change the small/medium/large densities because the object-size thresholds are in µm; it should not change the total density unless you also change the excluded ROI. Compare to prior results only when calibration and ROI match.
 
 ## Free Streamlit deployment (resource-guard edition)
 

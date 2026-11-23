@@ -9,6 +9,8 @@ import streamlit as st
 from PIL import Image
 from analysis import load_image, analyze
 from resource_guard import preflight_image, ResourceLimitError
+from roi_editor_component import roi_editor
+import hashlib
 
 st.set_page_config(page_title='Cardiac innervation | ImageJ workflow',layout='wide')
 st.title('Cardiac innervation quantification — V7.8 (pilot)')
@@ -25,7 +27,7 @@ with st.sidebar:
     small=st.number_input('Small diameter maximum (µm)',min_value=.1,value=5.)
     large=st.number_input('Large diameter minimum (µm)',min_value=.2,value=20.)
     bar_um=st.number_input('Scale-bar label (µm)',min_value=.01,value=200.)
-    bar_px=st.number_input('Scale-bar width (pixels) — verify manually',min_value=1,value=242)
+    st.caption('Scale-bar width is measured by dragging the cyan line on the image below.')
     exclude=st.number_input('Bottom annotation strip to exclude (pixels)',min_value=0,value=0)
     exclude_scale=st.checkbox('Exclude scale bar / annotation rectangle',value=False,help='Enable to exclude only the scale-bar rectangle, including its label. Disabled by default to preserve V7.8 validation measurements.')
     min_area=st.number_input('Minimum segmented object area (pixels)',min_value=1,value=1)
@@ -50,25 +52,36 @@ if file:
         st.image(plane if plane.dtype==np.uint8 else (plane>>8).astype(np.uint8), caption='Grayscale preview (native 16-bit values retained internally when selected)', use_container_width=False)
         if plane.dtype==np.uint16: st.warning('Experimental native 16-bit: results are not yet validated against ImageJ end-to-end. Legacy 8-bit mode remains the recommended baseline.')
         if exclude>=plane.shape[0]: st.error('Annotation exclusion is too large.');st.stop()
-        rect=None
+        h,w=plane.shape
+        image_id=hashlib.sha256(upload_bytes).hexdigest()[:12]
+        state_key='roi_editor_'+image_id
+        if state_key not in st.session_state:
+            st.session_state[state_key]={'line':[max(0,w-310),max(0,h-80),max(0,w-68),max(0,h-80)],
+                                         'rect':[max(0,w-350),max(0,h-110),w,h]}
+        st.subheader('Interactive scale calibration and annotation exclusion')
+        st.write('**Cyan line:** drag the endpoints to match the actual scale bar, or drag the middle to move it. **Orange rectangle:** drag it over the scale bar and its text; drag corners to resize. Choose the drawing mode above the image to redraw either shape.')
+        st.caption('The cyan line measures pixel length; it does not remove any pixels. Only the orange rectangle is excluded, and only when the exclusion checkbox is enabled.')
+        previous=st.session_state[state_key]
+        edited=roi_editor(rgb,previous['line'],previous['rect'],key='editor_'+image_id)
+        if edited is not None and all(k in edited for k in ('line','rect')):
+            previous={'line':edited['line'],'rect':edited['rect']}
+            st.session_state[state_key]=previous
+        line=previous['line']
+        measured_px=float(np.hypot(line[2]-line[0],line[3]-line[1]))
+        if measured_px<1:
+            st.error('Scale calibration line must be at least 1 pixel long. Drag its endpoints to the two ends of the scale bar.')
+            st.stop()
+        bar_px=measured_px
+        st.info(f'Scale line: **{bar_px:.2f} px** = **{bar_um:g} µm**; calibration: **{bar_um/bar_px:.5f} µm/px**.')
+        raw_rect=previous['rect']
+        x0,y0,x1,y1=[int(round(v)) for v in raw_rect]
+        x0=max(0,min(x0,w-1));x1=max(x0+1,min(x1,w))
+        y0=max(0,min(y0,h-1));y1=max(y0+1,min(y1,h))
+        rect=(x0,y0,x1,y1) if exclude_scale else None
         if exclude_scale:
-            h,w=plane.shape
-            st.subheader('Scale-bar exclusion rectangle')
-            st.caption('Set the rectangle around the scale bar AND its text label. Coordinates are measured from the top-left of the image. The red outline below previews the excluded area.')
-            a,b=st.columns(2)
-            with a:
-                x0=st.number_input('Rectangle left X (px)',min_value=0,max_value=w-1,value=max(0,w-350))
-                y0=st.number_input('Rectangle top Y (px)',min_value=0,max_value=h-1,value=max(0,h-110))
-            with b:
-                x1=st.number_input('Rectangle right X (px, exclusive)',min_value=1,max_value=w,value=w)
-                y1=st.number_input('Rectangle bottom Y (px, exclusive)',min_value=1,max_value=h,value=h)
-            rect=(x0,y0,x1,y1)
-            if x0>=x1 or y0>=y1:
-                st.error('Rectangle right/bottom must exceed left/top.');st.stop()
-            import cv2
-            preview=rgb.copy()
-            cv2.rectangle(preview,(x0,y0),(x1-1,y1-1),(255,0,0),max(2,round(min(h,w)/500)))
-            st.image(preview,caption='Exclusion preview (red outline); verify that it covers the entire scale bar and label without unnecessary tissue.',use_container_width=True)
+            st.info(f'Excluding rectangle x={x0}–{x1}, y={y0}–{y1} ({(x1-x0)*(y1-y0):,} pixels). These pixels are excluded from both the numerator and denominator.')
+        else:
+            st.caption('Orange rectangle is a preview only; exclusion is currently OFF.')
 
         r=analyze(plane,rgb,um_per_px=bar_um/bar_px,radius=radius,sigma=sigma,small_um=small,large_um=large,exclude_bottom=exclude,min_object_px=min_area,threshold_offset=threshold_offset,exclude_rect=rect)
         st.info(f'Otsu threshold: {r["threshold"]:.0f}; applied threshold: {r["effective_threshold"]:.0f}. Analyzed pixels: {r["valid_pixels"]:,}.')
@@ -78,9 +91,9 @@ if file:
         for col,(name,im) in zip(st.columns(2),ims[:2]): col.image(im,caption=name,use_container_width=True)
         for col,(name,im) in zip(st.columns(2),ims[2:]): col.image(im,caption=name,use_container_width=True)
         st.caption('Class sizes are equivalent circular diameters derived from connected-component area, not directly measured nerve width.')
-        summary=pd.DataFrame([{'pipeline_version':'V7.8-pilot','fluorescence_channel':channel,'image':file.name,'precision_mode':r['precision_mode'],'input_processing':metadata['input_processing'],'original_mode':metadata['original_mode'],'frames':metadata['frames'],'projection':metadata['projection'],'otsu_threshold':r['threshold'],'threshold_offset':threshold_offset,'effective_threshold':r['effective_threshold'],'background_radius_px':radius,'gaussian_sigma_px':sigma,'scale_bar_um':bar_um,'scale_bar_px':bar_px,'scale_um_per_px':bar_um/bar_px,'small_max_equivalent_diameter_um':small,'large_min_equivalent_diameter_um':large,'min_object_area_px':min_area,'excluded_bottom_px':exclude,'scale_bar_rectangle_enabled':exclude_scale,'excluded_rectangle_xyxy':str(rect),'small_density_percent':r['densities']['Small'],'medium_density_percent':r['densities']['Medium'],'large_density_percent':r['densities']['Large'],'total_density_percent':r['densities']['Total'],'object_count':len(r['objects'])}])
+        summary=pd.DataFrame([{'pipeline_version':'V7.8-pilot','fluorescence_channel':channel,'image':file.name,'precision_mode':r['precision_mode'],'input_processing':metadata['input_processing'],'original_mode':metadata['original_mode'],'frames':metadata['frames'],'projection':metadata['projection'],'otsu_threshold':r['threshold'],'threshold_offset':threshold_offset,'effective_threshold':r['effective_threshold'],'background_radius_px':radius,'gaussian_sigma_px':sigma,'scale_bar_um':bar_um,'scale_bar_px':bar_px,'scale_line_xyxy':str(line),'scale_um_per_px':bar_um/bar_px,'small_max_equivalent_diameter_um':small,'large_min_equivalent_diameter_um':large,'min_object_area_px':min_area,'excluded_bottom_px':exclude,'scale_bar_rectangle_enabled':exclude_scale,'excluded_rectangle_xyxy':str(rect),'small_density_percent':r['densities']['Small'],'medium_density_percent':r['densities']['Medium'],'large_density_percent':r['densities']['Large'],'total_density_percent':r['densities']['Total'],'object_count':len(r['objects'])}])
         st.dataframe(summary,hide_index=True)
-        settings={'pipeline_version':'V7.8-pilot','image':file.name,'channel':channel,'precision_mode':r['precision_mode'],'input_processing':metadata['input_processing'],'frames':metadata['frames'],'projection':metadata['projection'],'rolling_ball_radius_px':radius,'gaussian_sigma_px':sigma,'otsu_threshold':float(r['threshold']),'otsu_offset':int(threshold_offset),'applied_threshold':float(r['effective_threshold']),'scale_bar_um':bar_um,'scale_bar_px':bar_px,'um_per_px':bar_um/bar_px,'small_max_equivalent_diameter_um':small,'large_min_equivalent_diameter_um':large,'min_object_area_px':min_area,'excluded_bottom_px':exclude,'scale_bar_rectangle_enabled':exclude_scale,'excluded_rectangle_xyxy':str(rect),'classification_note':'Connected-component equivalent circular diameter, not measured nerve fiber width','density_note':'Percentage of valid ROI pixels in segmented connected objects'}
+        settings={'pipeline_version':'V7.8-pilot','image':file.name,'channel':channel,'precision_mode':r['precision_mode'],'input_processing':metadata['input_processing'],'frames':metadata['frames'],'projection':metadata['projection'],'rolling_ball_radius_px':radius,'gaussian_sigma_px':sigma,'otsu_threshold':float(r['threshold']),'otsu_offset':int(threshold_offset),'applied_threshold':float(r['effective_threshold']),'scale_bar_um':bar_um,'scale_bar_px':bar_px,'scale_line_xyxy':str(line),'um_per_px':bar_um/bar_px,'small_max_equivalent_diameter_um':small,'large_min_equivalent_diameter_um':large,'min_object_area_px':min_area,'excluded_bottom_px':exclude,'scale_bar_rectangle_enabled':exclude_scale,'excluded_rectangle_xyxy':str(rect),'classification_note':'Connected-component equivalent circular diameter, not measured nerve fiber width','density_note':'Percentage of valid ROI pixels in segmented connected objects'}
         buffer=BytesIO()
         with zipfile.ZipFile(buffer,'w',zipfile.ZIP_DEFLATED) as z:
             tiff_bytes=BytesIO();Image.fromarray(plane).save(tiff_bytes,format='TIFF');z.writestr('analysis_input_16bit.tif' if plane.dtype==np.uint16 else 'analysis_input_8bit.tif',tiff_bytes.getvalue())
